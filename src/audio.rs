@@ -27,7 +27,7 @@ pub struct AudioBuffer {
 }
 
 const SAMPLE_RATE: f64 = 44_100.0;
-const CHANNELS: i32 = 2;
+const CHANNELS: i32 = 1;
 const INTERLEAVED: bool = true;
 
 pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), portaudio::Error> {
@@ -89,15 +89,18 @@ pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), por
         (receiver, move |InputStreamCallbackArgs { buffer: data, .. }| {
             {
                 let (left, right) = time_ring_buffer.split_at_mut(fft_size);
+                //for ((x, t0), t1) in data.chunks(CHANNELS as usize)
                 for ((x, t0), t1) in data.chunks(CHANNELS as usize)
                     .zip(left[time_index..(time_index + buffer_size)].iter_mut())
                     .zip(right[time_index..(time_index + buffer_size)].iter_mut())
                 {
-                    let mono = Complex::new(gain * (x[0] + x[1]) / 2.0, 0.0);
+                    //let mono = Complex::new(gain * (x[0] + x[1]) / 2.0, 0.0);
+                    let mono = Complex::new(gain * x[0], 0.0);
                     *t0 = mono;
                     *t1 = mono;
                 }
             }
+            println!("time_index {}", time_index);
             time_index = (time_index + buffer_size as usize) % fft_size;
             fft.process(&time_ring_buffer[time_index..time_index + fft_size], &mut complex_freq_buffer[..]);
 
