@@ -18,6 +18,9 @@ use rustfft::FFT;
 use config::Config;
 use display::Vec4;
 
+use std::fs::File;
+use std::io::Write; 
+
 pub type MultiBuffer = Arc<Vec<Mutex<AudioBuffer>>>;
 pub type PortAudioStream = Stream<NonBlocking, Input<f32>>;
 
@@ -31,8 +34,8 @@ const CHANNELS: i32 = 1;
 const INTERLEAVED: bool = true;
 
 pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), portaudio::Error> {
-    let buffer_size = config.audio.buffer_size as usize;
     let fft_size = config.audio.fft_size as usize;
+    let buffer_size = config.audio.buffer_size as usize;
     let num_buffers = config.audio.num_buffers;
     let cutoff = config.audio.cutoff;
     let q = config.audio.q;
@@ -54,105 +57,78 @@ pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), por
     for _ in 0..num_buffers {
         buffers.push(Mutex::new(AudioBuffer {
             rendered: true,
-            analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size + 3],
+            analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size],
         }));
     }
     let buffers = Arc::new(buffers);
 
-    let (receiver, callback) = {
+    //let mut fBuffer = File::create("dump.txt").expect("Unable to create dumpfile");
+
+    let mut n = fft_size;
+    if n % 2 == 0 {
+        n -= 1;
+    }
+    let analytic = make_analytic(n, fft_size);
+
+    //let mut i =0;
+    //for x in analytic.iter() {
+    //    println!("{}:{},{}", i, x.re, x.im);
+    //    i += 1;
+    //}
+
+    //std::process::exit(0);
+
+    let callback = {
         let mut buffer_index = 0;
-        let (sender, receiver) = mpsc::channel();
-        let print_drop = config.debug.print_drop;
         let gain = config.audio.gain;
         let buffers = buffers.clone();
-        let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size + 3];
+        let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size];
 
-        let mut time_index = 0;
-        let mut time_ring_buffer = vec![Complex::new(0.0, 0.0); 2 * fft_size];
         // this gets multiplied to convolve stuff
         let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
         let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
+        let mut data_complex_buffer  = vec![Complex::new(0.0f32, 0.0); fft_size];
 
-        let mut n = fft_size - buffer_size;
-        if n % 2 == 0 {
-            n -= 1;
-        }
-        let analytic = make_analytic(n, fft_size);
+        //let analytic = make_analytic(n, fft_size);
         let mut fft = FFT::new(fft_size, false);
         let mut ifft = FFT::new(fft_size, true);
 
-        let mut prev_input = Complex::new(0.0, 0.0); // sample n-1
-        let mut prev_diff = Complex::new(0.0, 0.0); // sample n-1 - sample n-2
-        let mut angle_lp = get_lowpass(cutoff, q);
-        let mut noise_lp = get_lowpass(0.05, 0.7);
-
-        (receiver, move |InputStreamCallbackArgs { buffer: data, .. }| {
-            {
-                let (left, right) = time_ring_buffer.split_at_mut(fft_size);
-                //for ((x, t0), t1) in data.chunks(CHANNELS as usize)
-                for ((x, t0), t1) in data.chunks(CHANNELS as usize)
-                    .zip(left[time_index..(time_index + buffer_size)].iter_mut())
-                    .zip(right[time_index..(time_index + buffer_size)].iter_mut())
-                {
-                    //let mono = Complex::new(gain * (x[0] + x[1]) / 2.0, 0.0);
-                    let mono = Complex::new(gain * x[0], 0.0);
-                    *t0 = mono;
-                    *t1 = mono;
-                }
+        move |InputStreamCallbackArgs { buffer: data, .. }| {
+            
+             for (x,t) in data.chunks(CHANNELS as usize)
+                .zip(data_complex_buffer[..].iter_mut()) {
+                    *t = Complex::new(gain * x[0], 0.0);
             }
-            println!("time_index {}", time_index);
-            time_index = (time_index + buffer_size as usize) % fft_size;
-            fft.process(&time_ring_buffer[time_index..time_index + fft_size], &mut complex_freq_buffer[..]);
+
+            fft.process(&data_complex_buffer[..], &mut complex_freq_buffer[..]);
 
             for (x, y) in analytic.iter().zip(complex_freq_buffer.iter_mut()) {
                 *y = *x * *y;
             }
             ifft.process(&complex_freq_buffer[..], &mut complex_analytic_buffer[..]);
 
-            analytic_buffer[0] = analytic_buffer[buffer_size];
-            analytic_buffer[1] = analytic_buffer[buffer_size + 1];
-            analytic_buffer[2] = analytic_buffer[buffer_size + 2];
             let scale = fft_size as f32;
-            for (&x, y) in complex_analytic_buffer[fft_size - buffer_size..].iter().zip(analytic_buffer[3..].iter_mut()) {
-                let diff = x - prev_input; // vector
-                prev_input = x;
-
-                let angle = get_angle(diff, prev_diff).abs().log2().max(-1.0e12); // angular velocity (with processing)
-                prev_diff = diff;
-
-                let output = angle_lp(angle);
+            for (&x, y) in complex_analytic_buffer[fft_size - buffer_size..].iter()
+                .zip(analytic_buffer[..].iter_mut()) {
 
                 *y = Vec4 { vec: [
                     x.re / scale,
                     x.im / scale,
-                    output.exp2(), // smoothed angular velocity
-                    noise_lp((angle - output).abs()), // average angular noise
+                    0.75f32,
+                    0f32,
                 ]};
             }
 
-            let dropped = {
-                let mut buffer = buffers[buffer_index].lock().unwrap();
-                let rendered = buffer.rendered;
-                buffer.analytic.copy_from_slice(&analytic_buffer);
-                buffer.rendered = false;
-                !rendered
-            };
+            let mut buffer = buffers[buffer_index].lock().unwrap();
+            buffer.analytic.copy_from_slice(&analytic_buffer);
+            buffer.rendered = false;
+  
             buffer_index = (buffer_index + 1) % num_buffers;
-            if dropped && print_drop {
-                sender.send(()).ok();
-            }
+
             Continue
-        })
+        }
     };
-    if config.debug.print_drop {
-        use std::io::{self, Write};
-        thread::spawn(move || {
-            while let Ok(_) = receiver.recv() {
-                print!("!");
-                io::stdout().flush().unwrap();
-            }
-        });
-    }
+
     let stream = try!(pa.open_non_blocking_stream(settings, callback));
 
     Ok((stream, buffers))
@@ -160,7 +136,7 @@ pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), por
 
 // angle between two complex numbers
 // scales into [0, 0.5]
-fn get_angle(v: Complex<f32>, u: Complex<f32>) -> f32 {
+pub fn get_angle(v: Complex<f32>, u: Complex<f32>) -> f32 {
     // 2 atan2(len(len(v)*u − len(u)*v), len(len(v)*u + len(u)*v))
     let len_v_mul_u = v.norm_sqr().sqrt() * u;
     let len_u_mul_v = u.norm_sqr().sqrt() * v;
@@ -200,6 +176,9 @@ fn make_analytic(n: usize, m: usize) -> Vec<Complex<f32>> {
     use ::std::f32::consts::PI;
     assert_eq!(n % 2, 1, "n should be odd");
     assert!(n <= m, "n should be less than or equal to m");
+
+    println!("make_analytic, n={}, m={}.", n, m);
+
     // let a = 2.0 / n as f32;
     let mut fft = FFT::new(m, false);
 
@@ -223,7 +202,8 @@ fn make_analytic(n: usize, m: usize) -> Vec<Complex<f32>> {
         let k = 0.53836 + 0.46164 * (i as f32 * PI / (mid + 1) as f32).cos();
         impulse[mid + i] = impulse[mid + i].scale(k);
         impulse[mid - i] = impulse[mid - i].scale(k);
-    }
+    } 
+
     fft.process(&impulse, &mut freqs);
     freqs
 }

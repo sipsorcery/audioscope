@@ -1,4 +1,4 @@
-use std::{thread, time};
+use std::{thread, time};                                                                        
 
 use glium::{
     DisplayBuild,
@@ -51,7 +51,7 @@ pub fn display(config: &Config, buffers: MultiBuffer) {
         .with_vsync()
         .build_glium().unwrap();
 
-    let n = config.audio.buffer_size + 3;
+    let n = config.audio.buffer_size;
     let mut ys_data: Vec<_> = (0..n).map(|_| Vec4 { vec: [0.0, 0.0, 0.0, 0.0] }).collect();
     let ys = VertexBuffer::dynamic(&display, &ys_data).unwrap();
     let indices = NoIndices(PrimitiveType::LineStripAdjacency);
@@ -105,6 +105,9 @@ pub fn display(config: &Config, buffers: MultiBuffer) {
                 ys_data.copy_from_slice(&buffer.analytic);
                 buffer.rendered = true;
             };
+            //for i in &ys_data{                                                                                                                                                                  
+            //   write!(fBuffer, "{},{},{},{},", i.vec[0], i.vec[1], i.vec[2], i.vec[3]);                                                                                                                            
+            //} 
             ys.write(&ys_data);
             index = (index + 1) % buffers.len();
 

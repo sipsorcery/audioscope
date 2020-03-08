@@ -3,8 +3,8 @@
 
 [audio]
 buffer_size = 256
-num_buffers = 16
-fft_size = 1024
+num_buffers = 1
+fft_size = 256
 cutoff = 0.01
 q = 0.5
 gain = 1.0

@@ -11,8 +11,10 @@ mod config;
 mod audio;
 mod display;
 
+use num::complex::Complex;
 use config::load_config;
 use audio::init_audio;
+use audio::get_angle;
 use display::display;
 
 fn main() {
