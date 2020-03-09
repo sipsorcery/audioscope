@@ -10,3 +10,5 @@ glium = "*"
 portaudio = "*"
 num = "*"
 rustfft = { git = "https://github.com/awelkie/RustFFT" }
+periodic = "*"
+time = "*"

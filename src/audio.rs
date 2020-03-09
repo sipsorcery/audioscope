@@ -32,43 +32,35 @@ pub struct AudioBuffer {
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 1;
 const INTERLEAVED: bool = true;
+const GAIN: f32 = 1.0;
+const FFT_SIZE: usize = 1024;
+const BUFFER_SIZE: usize = 256;
+const NUM_BUFFERS: usize = 3;
 
-pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), portaudio::Error> {
-    let fft_size = config.audio.fft_size as usize;
-    let buffer_size = config.audio.buffer_size as usize;
-    let num_buffers = config.audio.num_buffers;
-    let cutoff = config.audio.cutoff;
-    let q = config.audio.q;
+pub struct Context {
+    pub analyticFilter: Vec<Complex<f32>>,
+    pub displayBuffers: MultiBuffer
+}
 
-    let pa = try!(PortAudio::new());
+pub fn init_audio(config: &Config) -> Context {
 
-    let def_input = try!(pa.default_input_device());
-    let input_info = try!(pa.device_info(def_input));
-    println!("Default input device name: {}", input_info.name);
+   let mut timeSeries = Vec::with_capacity(NUM_BUFFERS);
 
-    let latency = input_info.default_low_input_latency;
-    let input_params = StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
-
-    try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
-    let settings = InputStreamSettings::new(input_params, SAMPLE_RATE, buffer_size as u32);
-
-    let mut buffers = Vec::with_capacity(num_buffers);
-
-    for _ in 0..num_buffers {
-        buffers.push(Mutex::new(AudioBuffer {
+    for _ in 0..NUM_BUFFERS {
+        timeSeries.push(Mutex::new(AudioBuffer {
             rendered: true,
-            analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size],
+            analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]};BUFFER_SIZE + 3],
         }));
     }
-    let buffers = Arc::new(buffers);
 
     //let mut fBuffer = File::create("dump.txt").expect("Unable to create dumpfile");
 
-    let mut n = fft_size;
+    let mut n = FFT_SIZE;
     if n % 2 == 0 {
         n -= 1;
     }
-    let analytic = make_analytic(n, fft_size);
+    
+    let analytic = make_analytic(n,FFT_SIZE);
 
     //let mut i =0;
     //for x in analytic.iter() {
@@ -78,60 +70,111 @@ pub fn init_audio(config: &Config) -> Result<(PortAudioStream, MultiBuffer), por
 
     //std::process::exit(0);
 
-    let callback = {
-        let mut buffer_index = 0;
-        let gain = config.audio.gain;
-        let buffers = buffers.clone();
-        let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; buffer_size];
-
-        // this gets multiplied to convolve stuff
-        let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
-        let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
-        let mut data_complex_buffer  = vec![Complex::new(0.0f32, 0.0); fft_size];
-
-        //let analytic = make_analytic(n, fft_size);
-        let mut fft = FFT::new(fft_size, false);
-        let mut ifft = FFT::new(fft_size, true);
-
-        move |InputStreamCallbackArgs { buffer: data, .. }| {
-            
-             for (x,t) in data.chunks(CHANNELS as usize)
-                .zip(data_complex_buffer[..].iter_mut()) {
-                    *t = Complex::new(gain * x[0], 0.0);
-            }
-
-            fft.process(&data_complex_buffer[..], &mut complex_freq_buffer[..]);
-
-            for (x, y) in analytic.iter().zip(complex_freq_buffer.iter_mut()) {
-                *y = *x * *y;
-            }
-            ifft.process(&complex_freq_buffer[..], &mut complex_analytic_buffer[..]);
-
-            let scale = fft_size as f32;
-            for (&x, y) in complex_analytic_buffer[fft_size - buffer_size..].iter()
-                .zip(analytic_buffer[..].iter_mut()) {
-
-                *y = Vec4 { vec: [
-                    x.re / scale,
-                    x.im / scale,
-                    0.75f32,
-                    0f32,
-                ]};
-            }
-
-            let mut buffer = buffers[buffer_index].lock().unwrap();
-            buffer.analytic.copy_from_slice(&analytic_buffer);
-            buffer.rendered = false;
-  
-            buffer_index = (buffer_index + 1) % num_buffers;
-
-            Continue
-        }
+    let context = Context {
+        analyticFilter: analytic,
+        displayBuffers: Arc::new(timeSeries)
     };
 
-    let stream = try!(pa.open_non_blocking_stream(settings, callback));
+    context
+}
 
-    Ok((stream, buffers))
+//pub fn generate_sample(analytic_filter: &Vec<Complex<f32>>, shared_buffers: &MultiBuffer, freq: f32) -> f32 {
+pub fn generate_sample(shared_buffers: &MultiBuffer, freq: f64) {
+
+    println!("generate_sample freq {}", freq);
+
+    let mut n = FFT_SIZE;
+    if n % 2 == 0 {
+        n -= 1;
+    }
+    
+    let analytic_filter = make_analytic(n,FFT_SIZE);
+
+    let mut buffer_index = 0;
+    let gain = GAIN; //config.audio.gain;
+    let buffers = shared_buffers.clone();
+    let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; BUFFER_SIZE + 3];
+
+    // this gets multiplied to convolve stuff
+    let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+    let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+    let mut data_complex_buffer  = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+
+    //let analytic = make_analytic(n, FFT_SIZE);
+    let mut fft = FFT::new(FFT_SIZE, false);
+    let mut ifft = FFT::new(FFT_SIZE, true);
+    let mut prev_input = Complex::new(0.0, 0.0); // sample n-1
+    let mut prev_diff = Complex::new(0.0, 0.0); // sample n-1 - sample n-2
+
+    //for (x,t) in time_sample[..].iter()
+    //    .zip(data_complex_buffer[..].iter_mut()) {
+    //        *t = Complex::new(gain * x, 0.0);
+    //}
+
+    for i in 0..FFT_SIZE {
+        let mut re_sum: f32 = 0.0;
+        for j in 0..7 {
+            re_sum += (2.0 * std::f64::consts::PI * (i as f64 / freq * (j as f64))).sin() as f32;
+        }
+        data_complex_buffer[i].re = re_sum;
+    }
+
+    // println!("generate_sample {} {} {} {} {}, length {}",
+    //     data_complex_buffer[0].re,
+    //     data_complex_buffer[63].re, 
+    //     data_complex_buffer[127].re,
+    //     data_complex_buffer[191].re,
+    //     data_complex_buffer[255].re, 
+    //     data_complex_buffer.len());
+
+    fft.process(&data_complex_buffer[..], &mut complex_freq_buffer[..]);
+
+    for (x, y) in analytic_filter.iter().zip(complex_freq_buffer.iter_mut()) {
+        *y = *x * *y;
+    }
+
+    ifft.process(&complex_freq_buffer[..], &mut complex_analytic_buffer[..]);
+
+    // let mut count: i32 = 0;
+    // for(x) in complex_analytic_buffer.iter() {
+    //     println!("{} {}", count, x);
+    //     count += 1;
+
+    //     if(count > 100){ break};
+    // }
+
+    analytic_buffer[0] = analytic_buffer[BUFFER_SIZE];
+    analytic_buffer[1] = analytic_buffer[BUFFER_SIZE + 1];
+    analytic_buffer[2] = analytic_buffer[BUFFER_SIZE + 2];
+    let scale = FFT_SIZE as f32;
+    for (&x, y) in complex_analytic_buffer[FFT_SIZE - BUFFER_SIZE..].iter()
+        .zip(analytic_buffer[3..].iter_mut()) {
+
+        let diff = x - prev_input; // vector
+        prev_input = x;
+
+        let angle = get_angle(diff, prev_diff).abs().log2().max(-1.0e12); // angular velocity (with processing)
+        prev_diff = diff;
+
+        *y = Vec4 { vec: [
+            x.re / scale,
+            x.im / scale,
+            0.75, //angle,
+            0f32,
+        ]};
+    }
+
+    let mut buffer = buffers[buffer_index].lock().unwrap();
+    buffer.analytic.copy_from_slice(&analytic_buffer[..]);
+    buffer.rendered = false;
+ 
+    // let mut count: i32 = 0;
+    // for(x) in analytic_buffer.iter() {
+    //     println!("{} {} {}", count, x.vec[0], x.vec[1]);
+    //     count += 1;
+    // }
+
+    buffer_index = (buffer_index + 1) % NUM_BUFFERS;
 }
 
 // angle between two complex numbers

@@ -24,6 +24,7 @@ use config::{
 };
 use audio::{
     MultiBuffer,
+    Context
 };
 
 #[derive(Copy, Clone)]
@@ -45,13 +46,14 @@ pub struct Vec4 {
 implement_vertex!(Vec4, vec);
 
 
-pub fn display(config: &Config, buffers: MultiBuffer) {
+pub fn display(config: &Config, buffers: &MultiBuffer) {
+//pub fn display(config: &Config, context: Context) {
     let display = WindowBuilder::new()
         // .with_multisampling(4) // THIS IS LAGGY!
         .with_vsync()
         .build_glium().unwrap();
 
-    let n = config.audio.buffer_size;
+    let n = config.audio.buffer_size + 3;
     let mut ys_data: Vec<_> = (0..n).map(|_| Vec4 { vec: [0.0, 0.0, 0.0, 0.0] }).collect();
     let ys = VertexBuffer::dynamic(&display, &ys_data).unwrap();
     let indices = NoIndices(PrimitiveType::LineStripAdjacency);
@@ -100,14 +102,12 @@ pub fn display(config: &Config, buffers: MultiBuffer) {
 
         let mut target = display.draw();
         while { !buffers[index].lock().unwrap().rendered } {
+            //println!("New buffer available for display.");
             {
                 let mut buffer = buffers[index].lock().unwrap();
                 ys_data.copy_from_slice(&buffer.analytic);
                 buffer.rendered = true;
             };
-            //for i in &ys_data{                                                                                                                                                                  
-            //   write!(fBuffer, "{},{},{},{},", i.vec[0], i.vec[1], i.vec[2], i.vec[3]);                                                                                                                            
-            //} 
             ys.write(&ys_data);
             index = (index + 1) % buffers.len();
 
