@@ -23,8 +23,7 @@ use config::{
     Uniforms
 };
 use audio::{
-    MultiBuffer,
-    Context
+    MultiBuffer
 };
 
 #[derive(Copy, Clone)]

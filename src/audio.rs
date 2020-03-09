@@ -20,6 +20,7 @@ use display::Vec4;
 
 use std::fs::File;
 use std::io::Write; 
+use std::time::{Duration, SystemTime};
 
 pub type MultiBuffer = Arc<Vec<Mutex<AudioBuffer>>>;
 pub type PortAudioStream = Stream<NonBlocking, Input<f32>>;
@@ -37,23 +38,24 @@ const FFT_SIZE: usize = 1024;
 const BUFFER_SIZE: usize = 256;
 const NUM_BUFFERS: usize = 3;
 
-pub struct Context {
-    pub analyticFilter: Vec<Complex<f32>>,
-    pub displayBuffers: MultiBuffer
+pub struct AudioContext {
+    analytic_filter: Vec<Complex<f32>>,
+    pub time_ring_index: usize,
+    pub time_ring_buffer: Vec<Complex<f32>>,
+    pub display_buffer_index: usize,
+    prev_samples: Vec<Vec4>,
 }
 
-pub fn init_audio(config: &Config) -> Context {
+pub fn init_audio(config: &Config) -> (AudioContext, MultiBuffer) {
 
-   let mut timeSeries = Vec::with_capacity(NUM_BUFFERS);
+   let mut output_buffers = Vec::with_capacity(NUM_BUFFERS);
 
     for _ in 0..NUM_BUFFERS {
-        timeSeries.push(Mutex::new(AudioBuffer {
+        output_buffers.push(Mutex::new(AudioBuffer {
             rendered: true,
             analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]};BUFFER_SIZE + 3],
         }));
     }
-
-    //let mut fBuffer = File::create("dump.txt").expect("Unable to create dumpfile");
 
     let mut n = FFT_SIZE;
     if n % 2 == 0 {
@@ -62,43 +64,36 @@ pub fn init_audio(config: &Config) -> Context {
     
     let analytic = make_analytic(n,FFT_SIZE);
 
-    //let mut i =0;
-    //for x in analytic.iter() {
-    //    println!("{}:{},{}", i, x.re, x.im);
-    //    i += 1;
-    //}
-
-    //std::process::exit(0);
-
-    let context = Context {
-        analyticFilter: analytic,
-        displayBuffers: Arc::new(timeSeries)
+    let context = AudioContext {
+        analytic_filter: analytic,
+        time_ring_index: 0,
+        time_ring_buffer: vec![Complex::new(0.0, 0.0); 2 * FFT_SIZE],
+        display_buffer_index: 0,
+        prev_samples: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; 3]
     };
 
-    context
+    let display_buffer = Arc::new(output_buffers);
+
+    (context, display_buffer)
 }
 
-//pub fn generate_sample(analytic_filter: &Vec<Complex<f32>>, shared_buffers: &MultiBuffer, freq: f32) -> f32 {
-pub fn generate_sample(shared_buffers: &MultiBuffer, freq: f64) {
+pub fn generate_sample(context: &mut AudioContext, display_buffers: &MultiBuffer, freq: f32) {
 
-    println!("generate_sample freq {}", freq);
+    //println!("generate_sample freq {}", freq);
 
-    let mut n = FFT_SIZE;
-    if n % 2 == 0 {
-        n -= 1;
-    }
-    
-    let analytic_filter = make_analytic(n,FFT_SIZE);
+    let analytic_filter = &context.analytic_filter;
 
-    let mut buffer_index = 0;
     let gain = GAIN; //config.audio.gain;
-    let buffers = shared_buffers.clone();
     let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; BUFFER_SIZE + 3];
 
     // this gets multiplied to convolve stuff
     let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
     let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
     let mut data_complex_buffer  = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+
+    let time_ring_buffers = &mut context.time_ring_buffer;
+    let time_ring_index = context.time_ring_index;
+    //let mut time_ring_index_ref = &mut context.time_ring_index;
 
     //let analytic = make_analytic(n, FFT_SIZE);
     let mut fft = FFT::new(FFT_SIZE, false);
@@ -111,23 +106,33 @@ pub fn generate_sample(shared_buffers: &MultiBuffer, freq: f64) {
     //        *t = Complex::new(gain * x, 0.0);
     //}
 
-    for i in 0..FFT_SIZE {
-        let mut re_sum: f32 = 0.0;
-        for j in 0..7 {
-            re_sum += (2.0 * std::f64::consts::PI * (i as f64 / freq * (j as f64))).sin() as f32;
-        }
+    //println!("time ring index {}.", time_ring_index);
+
+    // Generating a dummy sample.
+    for i in 0..BUFFER_SIZE {
+        let re_sum: f32 =  (2.0 * std::f32::consts::PI * (i as f32 / freq)).sin() as f32;
+
         data_complex_buffer[i].re = re_sum;
     }
 
-    // println!("generate_sample {} {} {} {} {}, length {}",
-    //     data_complex_buffer[0].re,
-    //     data_complex_buffer[63].re, 
-    //     data_complex_buffer[127].re,
-    //     data_complex_buffer[191].re,
-    //     data_complex_buffer[255].re, 
-    //     data_complex_buffer.len());
+    // Copying the input audio sample into a ring buffer.
+    let (left, right) = (*time_ring_buffers).split_at_mut(FFT_SIZE);
+    for ((x, t0), t1) in data_complex_buffer.iter()
+        .zip(left[time_ring_index..(time_ring_index + BUFFER_SIZE)].iter_mut())
+        .zip(right[time_ring_index..(time_ring_index + BUFFER_SIZE)].iter_mut())
+    {
+        let mono = Complex::new(gain * x.re, 0.0);
+        *t0 = mono;
+        *t1 = mono;
+    }
+    context.time_ring_index = (time_ring_index + BUFFER_SIZE as usize) % FFT_SIZE;
 
-    fft.process(&data_complex_buffer[..], &mut complex_freq_buffer[..]);
+    // Start the audio sample processing using the oldest sample in the ring buffer:
+    // - FFT to extract the frequencies,
+    // - Apply the custom analytic filter (phase shift, filtering, windowing etc.),
+    // - Inverse FFT to get back the time processed series.
+
+    fft.process(&time_ring_buffers[time_ring_index..time_ring_index + FFT_SIZE], &mut complex_freq_buffer[..]);
 
     for (x, y) in analytic_filter.iter().zip(complex_freq_buffer.iter_mut()) {
         *y = *x * *y;
@@ -135,18 +140,15 @@ pub fn generate_sample(shared_buffers: &MultiBuffer, freq: f64) {
 
     ifft.process(&complex_freq_buffer[..], &mut complex_analytic_buffer[..]);
 
-    // let mut count: i32 = 0;
-    // for(x) in complex_analytic_buffer.iter() {
-    //     println!("{} {}", count, x);
-    //     count += 1;
+    // Final step is to calculate the angles between each time series data point.
+    // This angle is used to set the colour of the line drawn on the OpenGL surface.
 
-    //     if(count > 100){ break};
-    // }
+    analytic_buffer[0] = context.prev_samples[0];
+    analytic_buffer[1] = context.prev_samples[1];
+    analytic_buffer[2] = context.prev_samples[2];
 
-    analytic_buffer[0] = analytic_buffer[BUFFER_SIZE];
-    analytic_buffer[1] = analytic_buffer[BUFFER_SIZE + 1];
-    analytic_buffer[2] = analytic_buffer[BUFFER_SIZE + 2];
     let scale = FFT_SIZE as f32;
+
     for (&x, y) in complex_analytic_buffer[FFT_SIZE - BUFFER_SIZE..].iter()
         .zip(analytic_buffer[3..].iter_mut()) {
 
@@ -164,17 +166,15 @@ pub fn generate_sample(shared_buffers: &MultiBuffer, freq: f64) {
         ]};
     }
 
-    let mut buffer = buffers[buffer_index].lock().unwrap();
-    buffer.analytic.copy_from_slice(&analytic_buffer[..]);
-    buffer.rendered = false;
- 
-    // let mut count: i32 = 0;
-    // for(x) in analytic_buffer.iter() {
-    //     println!("{} {} {}", count, x.vec[0], x.vec[1]);
-    //     count += 1;
-    // }
+    // Record the last 3 samples to use in the next result.
+    &context.prev_samples.copy_from_slice(&analytic_buffer[BUFFER_SIZE..]);
 
-    buffer_index = (buffer_index + 1) % NUM_BUFFERS;
+    // Write the results to the display buffer.
+    let mut display_buffer = display_buffers[context.display_buffer_index].lock().unwrap();
+    display_buffer.analytic.copy_from_slice(&analytic_buffer);
+    display_buffer.rendered = false;
+ 
+    context.display_buffer_index = (context.display_buffer_index + 1) % NUM_BUFFERS;
 }
 
 // angle between two complex numbers
