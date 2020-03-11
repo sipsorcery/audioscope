@@ -48,6 +48,8 @@ pub struct AudioContext {
     pub time_ring_buffer: Vec<Complex<f32>>,
     pub display_buffer_index: usize,
     prev_samples: Vec<Vec4>,
+    prev_input: Complex<f32>,
+    prev_diff: Complex<f32>
 }
 
 pub fn init_audio(config: &Config) -> (AudioContextShared, MultiBuffer) {
@@ -73,7 +75,9 @@ pub fn init_audio(config: &Config) -> (AudioContextShared, MultiBuffer) {
         time_ring_index: 0,
         time_ring_buffer: vec![Complex::new(0.0, 0.0); 2 * FFT_SIZE],
         display_buffer_index: 0,
-        prev_samples: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; 3]
+        prev_samples: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; 3],
+        prev_input: Complex::new(0.0, 0.0),
+        prev_diff: Complex::new(0.0, 0.0)
     };
 
     let context_shared = Arc::new(Mutex::new(context));
@@ -99,7 +103,7 @@ pub fn init_portaudio(
     try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
     let settings = InputStreamSettings::new(input_params, SAMPLE_RATE, BUFFER_SIZE as u32);
     
-    let mut angle_lp = get_lowpass(0.01, 0.5);
+    let mut angle_lp = get_lowpass(config.audio.cutoff, config.audio.q);
     let mut noise_lp = get_lowpass(0.05, 0.7);
 
     let mut callback_audio_ctx = context_shared.clone();
@@ -151,14 +155,15 @@ pub fn process_sample(
     let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
 
     let mut time_ring_index = context.time_ring_index;
+    //let display_buffer_index = context.display_buffer_index;
     let time_ring_buffers = &mut context.time_ring_buffer;
 
     let mut fft = FFT::new(FFT_SIZE, false);
     let mut ifft = FFT::new(FFT_SIZE, true);
-    let mut prev_input = Complex::new(0.0, 0.0); // sample n-1
-    let mut prev_diff = Complex::new(0.0, 0.0); // sample n-1 - sample n-2
+    //let mut prev_input = Complex::new(0.0, 0.0); // sample n-1
+    //let mut prev_diff = Complex::new(0.0, 0.0); // sample n-1 - sample n-2
 
-    //println!("time ring index {}.", time_ring_index);
+    //println!("time ring index {}, display buffer index {}.", time_ring_index, display_buffer_index);
 
     // Copying the input audio sample into a ring buffer.
     let (left, right) = time_ring_buffers.split_at_mut(FFT_SIZE);
@@ -189,11 +194,13 @@ pub fn process_sample(
     // Final step is to calculate the angles between each time series data point.
     // This angle is used to set the colour of the line drawn on the OpenGL surface.
 
-    analytic_buffer[0] = context.prev_samples[0];
-    analytic_buffer[1] = context.prev_samples[1];
-    analytic_buffer[2] = context.prev_samples[2];
+    //analytic_buffer[0] = context.prev_samples[0];
+    //analytic_buffer[1] = context.prev_samples[1];
+    //analytic_buffer[2] = context.prev_samples[2];
 
     let scale = FFT_SIZE as f32;
+    let mut prev_input = context.prev_input;
+    let mut prev_diff = context.prev_diff;
 
     for (&x, y) in complex_analytic_buffer[FFT_SIZE - BUFFER_SIZE..].iter()
         .zip(analytic_buffer[3..].iter_mut()) {
@@ -216,16 +223,17 @@ pub fn process_sample(
         ]};
     }
 
-    // Record the last 3 samples to use in the next result.
-    &context.prev_samples.copy_from_slice(&analytic_buffer[BUFFER_SIZE..]);
-    context.time_ring_index = time_ring_index;
-
     // Write the results to the display buffer.
     let mut display_buffer = display_buffers[context.display_buffer_index].lock().unwrap();
     display_buffer.analytic.copy_from_slice(&analytic_buffer);
     display_buffer.rendered = false;
  
+    // Record the last 3 samples to use in the next result.
+    //&context.prev_samples.copy_from_slice(&analytic_buffer[BUFFER_SIZE..]);
+    context.time_ring_index = time_ring_index;
     context.display_buffer_index = (context.display_buffer_index + 1) % NUM_BUFFERS;
+    context.prev_input = prev_input;
+    context.prev_diff = prev_diff;
 }
 
 // angle between two complex numbers

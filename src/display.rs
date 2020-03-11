@@ -1,4 +1,4 @@
-use std::{thread, time};                                                                        
+use std::{thread, time};
 
 use glium::{
     DisplayBuild,
@@ -23,7 +23,7 @@ use config::{
     Uniforms
 };
 use audio::{
-    MultiBuffer
+    MultiBuffer,
 };
 
 #[derive(Copy, Clone)]
@@ -45,8 +45,7 @@ pub struct Vec4 {
 implement_vertex!(Vec4, vec);
 
 
-pub fn display(config: &Config, buffers: &MultiBuffer) {
-//pub fn display(config: &Config, context: Context) {
+pub fn display(config: &Config, buffers: MultiBuffer) {
     let display = WindowBuilder::new()
         // .with_multisampling(4) // THIS IS LAGGY!
         .with_vsync()
@@ -101,7 +100,6 @@ pub fn display(config: &Config, buffers: &MultiBuffer) {
 
         let mut target = display.draw();
         while { !buffers[index].lock().unwrap().rendered } {
-            //println!("New buffer available for display.");
             {
                 let mut buffer = buffers[index].lock().unwrap();
                 ys_data.copy_from_slice(&buffer.analytic);

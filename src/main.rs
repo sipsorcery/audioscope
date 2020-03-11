@@ -30,15 +30,16 @@ fn main() {
     let config = load_config();
     let (mut audio_context, display_buffer) = init_audio(&config);
     
-    //let mut stream = init_portaudio(&config, &mut audio_context, &mut display_buffer.clone()).unwrap();
-    //stream.start().unwrap();
+    /* let mut stream = init_portaudio(&config, &mut audio_context, &mut display_buffer.clone()).unwrap();
+    stream.start().unwrap();
+    display(&config, display_buffer);
+    stream.stop().unwrap(); */
 
     let audio_mutex = std::sync::Mutex::new(audio_context);
     let audio_arc = std::sync::Arc::new(audio_mutex);
     let display_buffer_producer = display_buffer.clone();
-    //let display_arc = audio_arc.clone();
 
-    let angle_lp = get_lowpass(0.01, 0.5);
+    let angle_lp = get_lowpass(config.audio.cutoff, config.audio.q);
     let angle_lp_mutex = Mutex::new(angle_lp);
     let angle_lp_arc = Arc::new(angle_lp_mutex);
 
@@ -52,7 +53,7 @@ fn main() {
 
     planner.add(
          move ||  {
-            let freq = base_freq + start_time.elapsed().as_secs() as f32 * 100.0;
+            let freq = base_freq;// + start_time.elapsed().as_secs() as f32 * 100.0;
             let mut ctx =  audio_arc.lock().unwrap();
             let mut angle_lp_fn = angle_lp_arc.lock().unwrap();
             let mut noise_lp_fn = noise_lp_arc.lock().unwrap();
@@ -61,13 +62,12 @@ fn main() {
 
             process_sample(&mut ctx, &audio_sample, &display_buffer_producer, angle_lp_fn.deref_mut(), noise_lp_fn.deref_mut());
         },
-        periodic::Every::new(Duration::from_millis(30)),
+        //periodic::Every::new(Duration::from_millis(30)),
+        periodic::Every::new(Duration::from_secs(1)),
     );
     planner.start();
 
-    display(&config, &display_buffer);
-
-    //stream.stop().unwrap();
+    display(&config, display_buffer); 
 
     // let mut stdout = stdout();
     // stdout.write(b"Press Enter to continue...").unwrap();
