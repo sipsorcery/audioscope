@@ -12,9 +12,7 @@ mod config;
 mod display;
 mod file_loader;
 
-use audio::{
-    get_lowpass, get_sample, init_audio, init_portaudio, process_sample
-};
+use audio::{get_lowpass, get_sample, init_audio, init_portaudio, process_sample};
 use config::load_config;
 use display::display;
 use std::time::{Duration, SystemTime};
@@ -28,51 +26,58 @@ fn main() {
     let buffer_size = config.audio.buffer_size as usize;
     let cutoff = config.audio.cutoff;
     let q = config.audio.q;
-
     let display_config = load_config();
-
     let (mut audio_context, display_buffer) = init_audio(&config);
-    
     let confg_arc = Arc::new(Mutex::new(config));
 
-    let mut stream = init_portaudio(&confg_arc, &mut audio_context, &mut display_buffer.clone()).unwrap();
-    stream.start().unwrap();
-    display(&display_config, display_buffer);
-    stream.stop().unwrap(); 
+    if (true) {
+        // Use portaudio audio input.
+        let mut stream = init_portaudio(&confg_arc, &mut audio_context, &mut display_buffer.clone()).unwrap();
+        stream.start().unwrap();
+        display(&display_config, display_buffer);
+        stream.stop().unwrap();
+    } else {
+        // Use preiodic timer to generate a dummy signal.
+        let audio_mutex = std::sync::Mutex::new(audio_context);
+        let audio_arc = std::sync::Arc::new(audio_mutex);
+        let display_buffer_producer = display_buffer.clone();
 
-    /* let audio_mutex = std::sync::Mutex::new(audio_context);
-    let audio_arc = std::sync::Arc::new(audio_mutex);
-    let display_buffer_producer = display_buffer.clone();
+        let angle_lp = get_lowpass(cutoff, q);
+        let angle_lp_mutex = Mutex::new(angle_lp);
+        let angle_lp_arc = Arc::new(angle_lp_mutex);
 
-    let angle_lp = get_lowpass(cutoff, q);
-    let angle_lp_mutex = Mutex::new(angle_lp);
-    let angle_lp_arc = Arc::new(angle_lp_mutex);
+        let noise_lp = get_lowpass(0.05, 0.7);
+        let noise_lp_mutex = Mutex::new(noise_lp);
+        let noise_lp_arc = Arc::new(noise_lp_mutex);
 
-    let noise_lp = get_lowpass(0.05, 0.7);
-    let noise_lp_mutex = Mutex::new(noise_lp);
-    let noise_lp_arc = Arc::new(noise_lp_mutex);
+        let base_freq = 440.0;
+        let start_time = std::time::Instant::now();
+        let mut planner = periodic::Planner::new();
 
-    let base_freq = 440.0;
-    let start_time = std::time::Instant::now();
-    let mut planner = periodic::Planner::new();
+        planner.add(
+            move || {
+                let freq = base_freq + start_time.elapsed().as_secs() as f32 * 100.0;
+                let mut ctx = audio_arc.lock().unwrap();
+                let mut angle_lp_fn = angle_lp_arc.lock().unwrap();
+                let mut noise_lp_fn = noise_lp_arc.lock().unwrap();
 
-    planner.add(
-         move ||  {
-            let freq = base_freq;// + start_time.elapsed().as_secs() as f32 * 100.0;
-            let mut ctx =  audio_arc.lock().unwrap();
-            let mut angle_lp_fn = angle_lp_arc.lock().unwrap();
-            let mut noise_lp_fn = noise_lp_arc.lock().unwrap();
+                let audio_sample = get_sample(freq, buffer_size);
 
-            let audio_sample = get_sample(freq, buffer_size);
+                process_sample(
+                    &confg_arc,
+                    &mut ctx,
+                    &audio_sample,
+                    &display_buffer_producer,
+                    angle_lp_fn.deref_mut(),
+                    noise_lp_fn.deref_mut(),
+                );
+            },
+            periodic::Every::new(Duration::from_millis(30)),
+        );
+        planner.start();
 
-            process_sample(&config, &mut ctx, &audio_sample, &display_buffer_producer, angle_lp_fn.deref_mut(), noise_lp_fn.deref_mut());
-        },
-        //periodic::Every::new(Duration::from_millis(30)),
-        periodic::Every::new(Duration::from_secs(1)),
-    );
-    planner.start(); 
-
-    display(&display_config, display_buffer); */
+        display(&display_config, display_buffer);
+    }
 
     // let mut stdout = stdout();
     // stdout.write(b"Press Enter to continue...").unwrap();
