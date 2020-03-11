@@ -1,28 +1,20 @@
-use std::thread;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use portaudio::{
-    self,
-    PortAudio,
-    Stream,
-    NonBlocking,
-    Input,
-    StreamParameters,
-    InputStreamSettings,
-    InputStreamCallbackArgs,
-    Continue,
-    StreamCallbackResult
-};
-use portaudio::stream::{ InputCallbackArgs};
 use num::complex::Complex;
+//use portaudio::stream::InputCallbackArgs;
+use portaudio::{
+    self, Continue, Input, InputStreamCallbackArgs, InputStreamSettings, NonBlocking, PortAudio,
+    Stream, StreamParameters,
+};
 use rustfft::FFT;
+//use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+//use std::thread;
 
 use config::Config;
 use display::Vec4;
 
-use std::fs::File;
-use std::io::Write; 
-use std::time::{Duration, SystemTime};
+//use std::fs::File;
+//use std::io::Write;
+//use std::time::{Duration, SystemTime};
 
 pub type MultiBuffer = Arc<Vec<Mutex<AudioBuffer>>>;
 pub type PortAudioStream = Stream<NonBlocking, Input<f32>>;
@@ -37,10 +29,10 @@ pub struct AudioBuffer {
 const SAMPLE_RATE: f64 = 44_100.0;
 const CHANNELS: i32 = 1;
 const INTERLEAVED: bool = true;
-const GAIN: f32 = 1.0;
-const FFT_SIZE: usize = 1024;
-const BUFFER_SIZE: usize = 256;
-const NUM_BUFFERS: usize = 3;
+//const GAIN: f32 = 1.0;
+//const FFT_SIZE: usize = 1024;
+//const BUFFER_SIZE: usize = 256;
+//const NUM_BUFFERS: usize = 3;
 
 pub struct AudioContext {
     analytic_filter: Vec<Complex<f32>>,
@@ -49,35 +41,48 @@ pub struct AudioContext {
     pub display_buffer_index: usize,
     prev_samples: Vec<Vec4>,
     prev_input: Complex<f32>,
-    prev_diff: Complex<f32>
+    prev_diff: Complex<f32>,
 }
 
 pub fn init_audio(config: &Config) -> (AudioContextShared, MultiBuffer) {
 
-   let mut output_buffers = Vec::with_capacity(NUM_BUFFERS);
+    let buffer_size = config.audio.buffer_size as usize;
+    let fft_size = config.audio.fft_size as usize;
+    let num_buffers = config.audio.num_buffers;
 
-    for _ in 0..NUM_BUFFERS {
+    let mut output_buffers = Vec::with_capacity(num_buffers);
+
+    for _ in 0..num_buffers {
         output_buffers.push(Mutex::new(AudioBuffer {
             rendered: true,
-            analytic: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]};BUFFER_SIZE + 3],
+            analytic: vec![
+                Vec4 {
+                    vec: [0.0, 0.0, 0.0, 0.0]
+                };
+                buffer_size + 3
+            ],
         }));
     }
 
-    let mut n = FFT_SIZE;
+    let mut n = fft_size;
     if n % 2 == 0 {
         n -= 1;
     }
-    
-    let analytic = make_analytic(n,FFT_SIZE);
 
+    let analytic = make_analytic(n, fft_size);
     let context = AudioContext {
         analytic_filter: analytic,
         time_ring_index: 0,
-        time_ring_buffer: vec![Complex::new(0.0, 0.0); 2 * FFT_SIZE],
+        time_ring_buffer: vec![Complex::new(0.0, 0.0); 2 * fft_size],
         display_buffer_index: 0,
-        prev_samples: vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; 3],
+        prev_samples: vec![
+            Vec4 {
+                vec: [0.0, 0.0, 0.0, 0.0]
+            };
+            3
+        ],
         prev_input: Complex::new(0.0, 0.0),
-        prev_diff: Complex::new(0.0, 0.0)
+        prev_diff: Complex::new(0.0, 0.0),
     };
 
     let context_shared = Arc::new(Mutex::new(context));
@@ -87,9 +92,16 @@ pub fn init_audio(config: &Config) -> (AudioContextShared, MultiBuffer) {
 }
 
 pub fn init_portaudio(
-    config: &Config, 
+    config: &Arc<Mutex<Config>>,
     context_shared: &mut AudioContextShared,
-    display_buffers: & MultiBuffer) -> Result<PortAudioStream, portaudio::Error> {
+    display_buffers: &MultiBuffer,
+) -> Result<PortAudioStream, portaudio::Error> {
+
+    let callback_config = config.clone();
+    let audio_config = &config.lock().unwrap().audio;
+    let buffer_size = audio_config.buffer_size as usize;
+    let q = audio_config.q;
+    let cutoff = audio_config.cutoff;
 
     let pa = try!(PortAudio::new());
 
@@ -101,22 +113,27 @@ pub fn init_portaudio(
     let input_params = StreamParameters::<f32>::new(def_input, CHANNELS, INTERLEAVED, latency);
 
     try!(pa.is_input_format_supported(input_params, SAMPLE_RATE));
-    let settings = InputStreamSettings::new(input_params, SAMPLE_RATE, BUFFER_SIZE as u32);
-    
-    let mut angle_lp = get_lowpass(config.audio.cutoff, config.audio.q);
+    let settings = InputStreamSettings::new(input_params, SAMPLE_RATE, buffer_size as u32);
+    let mut angle_lp = get_lowpass(cutoff, q);
     let mut noise_lp = get_lowpass(0.05, 0.7);
 
     let mut callback_audio_ctx = context_shared.clone();
     let callback_display_buffer = display_buffers.clone();
 
     let callback = move |InputStreamCallbackArgs { buffer: data, .. }| {
-    
-        let mut audio_sample  = vec![Complex::new(0.0f32, 0.0); BUFFER_SIZE];
-        for i in 0..BUFFER_SIZE {
+        let mut audio_sample = vec![Complex::new(0.0f32, 0.0); buffer_size];
+        for i in 0..buffer_size {
             audio_sample[i].re = data[i];
         }
 
-        process_sample(&mut callback_audio_ctx, &audio_sample, &callback_display_buffer, &mut angle_lp, &mut noise_lp);
+        process_sample(
+            &callback_config,
+            &mut callback_audio_ctx,
+            &audio_sample,
+            &callback_display_buffer,
+            &mut angle_lp,
+            &mut noise_lp,
+        );
 
         Continue
     };
@@ -126,63 +143,81 @@ pub fn init_portaudio(
     Ok(stream)
 }
 
-pub fn get_sample(freq: f32) -> Vec<Complex<f32>> {
-    let mut audio_sample  = vec![Complex::new(0.0f32, 0.0); BUFFER_SIZE];
+pub fn get_sample(freq: f32, buffer_size: usize) -> Vec<Complex<f32>> {
+    let mut audio_sample = vec![Complex::new(0.0f32, 0.0); buffer_size];
     // Generating a dummy sample.
-    for i in 0..BUFFER_SIZE {
-        let re_sum: f32 =  (2.0 * std::f32::consts::PI * (i as f32 / freq)).sin() as f32;
+    for i in 0..buffer_size {
+        let re_sum: f32 = (2.0 * std::f32::consts::PI * (i as f32 / freq)).sin() as f32;
         audio_sample[i].re = re_sum;
     }
     audio_sample
 }
 
 pub fn process_sample(
-    context_shared: &mut AudioContextShared, 
+    config: &Arc<Mutex<Config>>,
+    //config: &Config,
+    context_shared: &mut AudioContextShared,
     audio_sample: &Vec<Complex<f32>>,
-    display_buffers: &MultiBuffer, 
+    display_buffers: &MultiBuffer,
     angle_low_pass: &mut FilterFunction,
     noise_low_pass: &mut FilterFunction) {
 
-    //println!("process sample {} bytes", audio_sample.len());
+    //println!("process sample {},{},{},{},{},{},{},{}", 
+    //audio_sample[0],audio_sample[1],audio_sample[2],audio_sample[3],
+    //audio_sample[4],audio_sample[5],audio_sample[6],audio_sample[7]);
+
+    let audio_config = &config.lock().unwrap().audio;
+    let buffer_size = audio_config.buffer_size as usize;
+    let fft_size = audio_config.fft_size as usize;
+    let gain = audio_config.gain;
+    let num_buffers = audio_config.num_buffers;
 
     let mut context = context_shared.lock().unwrap();
 
-    let gain = GAIN; //config.audio.gain;
-    let mut analytic_buffer = vec![Vec4 {vec: [0.0, 0.0, 0.0, 0.0]}; BUFFER_SIZE + 3];
+    let mut analytic_buffer = vec![
+        Vec4 {
+            vec: [0.0, 0.0, 0.0, 0.0]
+        };
+        buffer_size + 3
+    ];
 
     // this gets multiplied to convolve stuff
-    let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
-    let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
+    let mut complex_freq_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
+    let mut complex_analytic_buffer = vec![Complex::new(0.0f32, 0.0); fft_size];
 
     let mut time_ring_index = context.time_ring_index;
     //let display_buffer_index = context.display_buffer_index;
     let time_ring_buffers = &mut context.time_ring_buffer;
 
-    let mut fft = FFT::new(FFT_SIZE, false);
-    let mut ifft = FFT::new(FFT_SIZE, true);
+    let mut fft = FFT::new(fft_size, false);
+    let mut ifft = FFT::new(fft_size, true);
     //let mut prev_input = Complex::new(0.0, 0.0); // sample n-1
     //let mut prev_diff = Complex::new(0.0, 0.0); // sample n-1 - sample n-2
 
     //println!("time ring index {}, display buffer index {}.", time_ring_index, display_buffer_index);
 
     // Copying the input audio sample into a ring buffer.
-    let (left, right) = time_ring_buffers.split_at_mut(FFT_SIZE);
-    for ((x, t0), t1) in audio_sample.iter()
-        .zip(left[time_ring_index..(time_ring_index + BUFFER_SIZE)].iter_mut())
-        .zip(right[time_ring_index..(time_ring_index + BUFFER_SIZE)].iter_mut())
+    let (left, right) = time_ring_buffers.split_at_mut(fft_size);
+    for ((x, t0), t1) in audio_sample
+        .iter()
+        .zip(left[time_ring_index..(time_ring_index + buffer_size)].iter_mut())
+        .zip(right[time_ring_index..(time_ring_index + buffer_size)].iter_mut())
     {
         let mono = Complex::new(gain * x.re, 0.0);
         *t0 = mono;
         *t1 = mono;
     }
-    time_ring_index = (time_ring_index + BUFFER_SIZE as usize) % FFT_SIZE;
+    time_ring_index = (time_ring_index + buffer_size as usize) % fft_size;
 
     // Start the audio sample processing using the oldest sample in the ring buffer:
     // - FFT to extract the frequencies,
     // - Apply the custom analytic filter (phase shift, filtering, windowing etc.),
     // - Inverse FFT to get back the time processed series.
 
-    fft.process(&time_ring_buffers[time_ring_index..time_ring_index + FFT_SIZE], &mut complex_freq_buffer[..]);
+    fft.process(
+        &time_ring_buffers[time_ring_index..time_ring_index + fft_size],
+        &mut complex_freq_buffer[..],
+    );
 
     let analytic_filter = &context.analytic_filter;
     for (x, y) in analytic_filter.iter().zip(complex_freq_buffer.iter_mut()) {
@@ -198,13 +233,16 @@ pub fn process_sample(
     //analytic_buffer[1] = context.prev_samples[1];
     //analytic_buffer[2] = context.prev_samples[2];
 
-    let scale = FFT_SIZE as f32;
+    let scale = fft_size as f32;
     let mut prev_input = context.prev_input;
     let mut prev_diff = context.prev_diff;
 
-    for (&x, y) in complex_analytic_buffer[FFT_SIZE - BUFFER_SIZE..].iter()
-        .zip(analytic_buffer[3..].iter_mut()) {
+    //println!("Output sample{}:", context.display_buffer_index);
 
+    for (&x, y) in complex_analytic_buffer[fft_size - buffer_size..]
+        .iter()
+        .zip(analytic_buffer[3..].iter_mut())
+    {
         let diff = x - prev_input; // vector
         prev_input = x;
 
@@ -213,25 +251,28 @@ pub fn process_sample(
 
         let output = angle_low_pass(angle);
 
-        //println!("angle {}, output {}", angle, output);
+        *y = Vec4 {
+            vec: [
+                x.re / scale,
+                x.im / scale,
+                output.exp2(),                          // smoothed angular velocity
+                noise_low_pass((angle - output).abs()), // average angular noise
+            ],
+        };
 
-        *y = Vec4 { vec: [
-            x.re / scale,
-            x.im / scale,
-            output.exp2(), // smoothed angular velocity
-            noise_low_pass((angle - output).abs()), // average angular noise
-        ]};
+        //println!("{}, {}, a={}, {}, {}", y.vec[0], y.vec[1], angle, y.vec[2], y.vec[3]);
     }
 
     // Write the results to the display buffer.
-    let mut display_buffer = display_buffers[context.display_buffer_index].lock().unwrap();
+    let mut display_buffer = display_buffers[context.display_buffer_index]
+        .lock()
+        .unwrap();
     display_buffer.analytic.copy_from_slice(&analytic_buffer);
     display_buffer.rendered = false;
- 
     // Record the last 3 samples to use in the next result.
     //&context.prev_samples.copy_from_slice(&analytic_buffer[BUFFER_SIZE..]);
     context.time_ring_index = time_ring_index;
-    context.display_buffer_index = (context.display_buffer_index + 1) % NUM_BUFFERS;
+    context.display_buffer_index = (context.display_buffer_index + 1) % num_buffers;
     context.prev_input = prev_input;
     context.prev_diff = prev_diff;
 }
@@ -275,7 +316,7 @@ pub fn get_lowpass(n: f32, q: f32) -> FilterFunction {
 // real part removes DC and nyquist, imaginary part phase shifts by 90
 // should act as bandpass (remove all negative frequencies + DC & nyquist)
 fn make_analytic(n: usize, m: usize) -> Vec<Complex<f32>> {
-    use ::std::f32::consts::PI;
+    use std::f32::consts::PI;
     assert_eq!(n % 2, 1, "n should be odd");
     assert!(n <= m, "n should be less than or equal to m");
     // let a = 2.0 / n as f32;
@@ -288,7 +329,7 @@ fn make_analytic(n: usize, m: usize) -> Vec<Complex<f32>> {
 
     impulse[mid].re = 1.0;
     let re = -1.0 / (mid - 1) as f32;
-    for i in 1..mid+1 {
+    for i in 1..mid + 1 {
         if i % 2 == 0 {
             impulse[mid + i].re = re;
             impulse[mid - i].re = re;
@@ -315,7 +356,7 @@ fn test_analytic() {
     // 40hz is above 0db
     assert!(10.0 * freqs[1].norm_sqr().log(10.0) > 0.0);
     // -40hz is below -12db
-    assert!(10.0 * freqs[m-1].norm_sqr().log(10.0) < -12.0);
+    assert!(10.0 * freqs[m - 1].norm_sqr().log(10.0) < -12.0);
     // actually these magnitudes are halved bc passband is +6db
 }
 

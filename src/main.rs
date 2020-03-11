@@ -13,13 +13,10 @@ mod display;
 mod file_loader;
 
 use audio::{
-    get_lowpass, get_sample, init_audio, init_portaudio, process_sample, AudioContext,
-    FilterFunction,
+    get_lowpass, get_sample, init_audio, init_portaudio, process_sample
 };
 use config::load_config;
 use display::display;
-use num::complex::Complex;
-use std::io::{stdin, stdout, Read, Write};
 use std::time::{Duration, SystemTime};
 use std::{
     ops::DerefMut,
@@ -28,18 +25,26 @@ use std::{
 
 fn main() {
     let config = load_config();
+    let buffer_size = config.audio.buffer_size as usize;
+    let cutoff = config.audio.cutoff;
+    let q = config.audio.q;
+
+    let display_config = load_config();
+
     let (mut audio_context, display_buffer) = init_audio(&config);
     
-    /* let mut stream = init_portaudio(&config, &mut audio_context, &mut display_buffer.clone()).unwrap();
-    stream.start().unwrap();
-    display(&config, display_buffer);
-    stream.stop().unwrap(); */
+    let confg_arc = Arc::new(Mutex::new(config));
 
-    let audio_mutex = std::sync::Mutex::new(audio_context);
+    let mut stream = init_portaudio(&confg_arc, &mut audio_context, &mut display_buffer.clone()).unwrap();
+    stream.start().unwrap();
+    display(&display_config, display_buffer);
+    stream.stop().unwrap(); 
+
+    /* let audio_mutex = std::sync::Mutex::new(audio_context);
     let audio_arc = std::sync::Arc::new(audio_mutex);
     let display_buffer_producer = display_buffer.clone();
 
-    let angle_lp = get_lowpass(config.audio.cutoff, config.audio.q);
+    let angle_lp = get_lowpass(cutoff, q);
     let angle_lp_mutex = Mutex::new(angle_lp);
     let angle_lp_arc = Arc::new(angle_lp_mutex);
 
@@ -58,16 +63,16 @@ fn main() {
             let mut angle_lp_fn = angle_lp_arc.lock().unwrap();
             let mut noise_lp_fn = noise_lp_arc.lock().unwrap();
 
-            let audio_sample = get_sample(freq);
+            let audio_sample = get_sample(freq, buffer_size);
 
-            process_sample(&mut ctx, &audio_sample, &display_buffer_producer, angle_lp_fn.deref_mut(), noise_lp_fn.deref_mut());
+            process_sample(&config, &mut ctx, &audio_sample, &display_buffer_producer, angle_lp_fn.deref_mut(), noise_lp_fn.deref_mut());
         },
         //periodic::Every::new(Duration::from_millis(30)),
         periodic::Every::new(Duration::from_secs(1)),
     );
-    planner.start();
+    planner.start(); 
 
-    display(&config, display_buffer); 
+    display(&display_config, display_buffer); */
 
     // let mut stdout = stdout();
     // stdout.write(b"Press Enter to continue...").unwrap();
